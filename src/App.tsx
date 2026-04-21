@@ -1,337 +1,451 @@
-import { useState, useEffect, useMemo } from 'react';
-import { 
-  Activity, 
-  Droplets, 
-  Zap, 
-  Clock, 
-  Settings, 
-  AlertTriangle, 
-  CheckCircle2, 
-  TrendingUp, 
+import * as React from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Droplets,
   Factory,
-  BarChart3,
-  Gauge as GaugeIcon
+  Zap,
 } from 'lucide-react';
-import { 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
+import {
+  Area,
   AreaChart,
-  Area
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts';
-import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
+import {
+  EOH_POLL_INTERVAL_MS,
+  describeEohError,
+  fetchDashboardSnapshot,
+  type DashboardAlert,
+  type WorkshopData,
+} from './services/eohApi';
 
-// --- Types & Constants ---
+type LoadState = 'loading' | 'ready' | 'error';
 
-interface PowerData {
-  voltage: number;
-  current: number;
-  activePower: number;
-  totalEnergy: number;
-  frequency: number;
-  pf: number; // Power Factor
-}
-
-interface WaterData {
-  flowRate: number;
-  totalVolume: number;
-  pressure: number;
-}
-
-interface WorkshopData {
-  id: string;
-  name: string;
-  status: 'online' | 'offline' | 'warning';
-  power: PowerData;
-  water: WaterData;
-  history: { time: string; power: number }[];
-}
-
-const GENERATION_INTERVAL = 3000;
-const MAX_HISTORY_POINTS = 20;
-
-// --- Mock Data Utilities ---
-
-const generateMockData = (prevData?: WorkshopData[]): WorkshopData[] => {
-  const workshops = [
-    { name: 'Xưởng Sơn', id: 'son', shopCode: 'PAINT_SHOP_01' },
-    { name: 'Xưởng Space', id: 'space', shopCode: 'SPACE_SHOP_02' }
-  ];
-  
-  return workshops.map((shop) => {
-    const prev = prevData?.find(d => d.id === shop.id);
-    const newPower = (prev?.power.activePower || 4500) + (Math.random() * 200 - 100);
-    const timeLabel = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    
-    const newHistory = [...(prev?.history || [])];
-    newHistory.push({ time: timeLabel, power: newPower });
-    if (newHistory.length > MAX_HISTORY_POINTS) newHistory.shift();
-    
-    return {
-      id: shop.id,
-      name: shop.name,
-      status: Math.random() > 0.98 ? 'warning' : 'online',
-      power: {
-        voltage: 220 + (Math.random() * 2 - 1),
-        current: (prev?.power.current || 20) + (Math.random() * 1 - 0.5),
-        activePower: newPower,
-        totalEnergy: (prev?.power.totalEnergy || 12500) + Math.random() * 0.1,
-        frequency: 50 + (Math.random() * 0.1 - 0.05),
-        pf: 0.92 + (Math.random() * 0.05),
-      },
-      water: {
-        flowRate: (prev?.water.flowRate || 5) + (Math.random() * 0.2 - 0.1),
-        totalVolume: (prev?.water.totalVolume || 840) + Math.random() * 0.05,
-        pressure: 3.5 + (Math.random() * 0.4 - 0.2),
-      },
-      history: newHistory,
-    };
-  });
+const STATUS_CLASS = {
+  online: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+  warning: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
+  offline: 'text-rose-400 bg-rose-500/10 border-rose-500/30',
 };
-
-// --- Sub-components ---
-
-// --- Main App ---
 
 export default function App() {
   const [data, setData] = useState<WorkshopData[]>([]);
+  const [alerts, setAlerts] = useState<DashboardAlert[]>([]);
+  const [loadState, setLoadState] = useState<LoadState>('loading');
+  const [error, setError] = useState('');
   const [time, setTime] = useState(new Date());
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const dataRef = useRef<WorkshopData[]>([]);
 
   useEffect(() => {
-    setData(generateMockData());
-    const dataTimer = setInterval(() => {
-      setData(prev => generateMockData(prev));
-    }, GENERATION_INTERVAL);
+    let disposed = false;
+    let inFlight = false;
+    let controller: AbortController | null = null;
 
-    const clockTimer = setInterval(() => {
-      setTime(new Date());
-    }, 1000);
+    const load = async () => {
+      if (inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      controller = new AbortController();
+
+      try {
+        const snapshot = await fetchDashboardSnapshot(dataRef.current, controller.signal);
+
+        if (disposed) {
+          return;
+        }
+
+        dataRef.current = snapshot.workshops;
+        setData(snapshot.workshops);
+        setAlerts(snapshot.alerts);
+        setLatencyMs(snapshot.latencyMs);
+        setLastUpdated(snapshot.fetchedAt);
+        setError('');
+        setLoadState('ready');
+      } catch (caughtError) {
+        if (disposed || (caughtError instanceof DOMException && caughtError.name === 'AbortError')) {
+          return;
+        }
+
+        setError(describeEohError(caughtError));
+        setLoadState(dataRef.current.length ? 'ready' : 'error');
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    load();
+
+    const dataTimer = window.setInterval(load, EOH_POLL_INTERVAL_MS);
+    const clockTimer = window.setInterval(() => setTime(new Date()), 1000);
 
     return () => {
-      clearInterval(dataTimer);
-      clearInterval(clockTimer);
+      disposed = true;
+      controller?.abort();
+      window.clearInterval(dataTimer);
+      window.clearInterval(clockTimer);
     };
   }, []);
 
-  if (data.length === 0) return null;
+  const totals = useMemo(() => {
+    const totalPower = sumKnown(data.map((workshop) => workshop.power.totalEnergy));
+    const totalWater = sumKnown(data.map((workshop) => workshop.water.totalVolume));
+    const currentLoad = sumKnown(data.map((workshop) => workshop.power.activePower));
+    const configCount = data.reduce((sum, workshop) => sum + workshop.configCount, 0);
+    const sensorCount = data.reduce((sum, workshop) => sum + workshop.sensorCount, 0);
 
-  const totalPower = data.reduce((acc, current) => acc + current.power.totalEnergy, 0);
-  const totalWater = data.reduce((acc, current) => acc + current.water.totalVolume, 0);
-  const currentLoad = data.reduce((acc, current) => acc + current.power.activePower, 0) / 1000;
+    return { totalPower, totalWater, currentLoad, configCount, sensorCount };
+  }, [data]);
+
+  const systemStatus = getSystemStatus(loadState, error, data.length);
 
   return (
-    <div className="flex flex-col h-screen w-full p-4 gap-4 overflow-hidden bg-[#0f172a]">
-      {/* Header */}
-      <header className="flex justify-between items-center bg-slate-800/80 p-4 rounded-lg border border-slate-700 shrink-0">
-        <div className="flex items-center gap-4">
-          <div className="p-2 bg-emerald-500 rounded text-slate-900">
-            <Factory className="w-6 h-6" />
+    <div className="flex h-screen w-full flex-col gap-4 overflow-hidden bg-[#0f172a] p-4">
+      <header className="flex shrink-0 flex-col gap-4 rounded-lg border border-slate-700 bg-slate-800/80 p-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex min-w-0 items-center gap-4">
+          <div className="rounded bg-emerald-500 p-2 text-slate-900">
+            <Factory className="h-6 w-6" />
           </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight uppercase">Industrial Energy Monitor System</h1>
-            <p className="text-xs text-slate-400 mono opacity-70">SCADA_NODE_v2.4 // ENERGY_HUB_01</p>
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold uppercase tracking-tight">Industrial Energy Monitor System</h1>
+            <p className="mono truncate text-xs text-slate-400 opacity-70">EOH_API // SCADA_DASHBOARD</p>
           </div>
         </div>
-        
-        <div className="flex gap-8 items-center">
-          <div className="text-right">
-            <p className="text-xs text-slate-500 uppercase">System Status</p>
-            <div className="flex items-center justify-end text-emerald-400 font-bold">
-              <span className="status-dot bg-emerald-500 glow-emerald"></span>
-              OPERATIONAL
+
+        <div className="flex flex-wrap items-center gap-6 md:justify-end">
+          <div>
+            <p className="text-xs uppercase text-slate-500">System Status</p>
+            <div className={cn('flex items-center font-bold', systemStatus.color)}>
+              <span className={cn('status-dot', systemStatus.dot)} />
+              {systemStatus.label}
             </div>
           </div>
-          <div className="text-right">
-            <p className="text-xs text-slate-500 uppercase">Last Update</p>
-            <p className="mono text-sm">{time.toLocaleTimeString()}</p>
+          <div>
+            <p className="text-xs uppercase text-slate-500">Last Update</p>
+            <p className="mono text-sm">{lastUpdated ? lastUpdated.toLocaleTimeString() : time.toLocaleTimeString()}</p>
+          </div>
+          <div>
+            <p className="text-xs uppercase text-slate-500">Poll Rate</p>
+            <p className="mono text-sm">{Math.round(EOH_POLL_INTERVAL_MS / 1000)}s</p>
           </div>
         </div>
       </header>
 
-      {/* Main Grid */}
-      <main className="grid grid-cols-1 lg:grid-cols-4 gap-4 flex-grow overflow-hidden min-h-0">
-        {/* Left Sidebar */}
-        <aside className="col-span-1 flex flex-col gap-4 overflow-y-auto pr-1">
-          <section className="glass-panel p-4 rounded-xl shrink-0">
-            <h3 className="text-xs font-semibold text-slate-400 mb-4 border-b border-slate-700 pb-2 uppercase tracking-wider">Global Metrics</h3>
-            <div className="space-y-6">
-              <div className="flex flex-col">
-                <span className="text-[10px] text-slate-500 uppercase font-mono tracking-tighter">Total Power Consumption</span>
-                <span className="text-3xl font-bold mono text-emerald-400 tabular-nums">
-                  {totalPower.toLocaleString(undefined, { maximumFractionDigits: 1 })} <small className="text-sm">kWh</small>
-                </span>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-[10px] text-slate-500 uppercase font-mono tracking-tighter">Total Water Usage</span>
-                <span className="text-3xl font-bold mono text-sky-400 tabular-nums">
-                  {totalWater.toLocaleString(undefined, { maximumFractionDigits: 1 })} <small className="text-sm">m³</small>
-                </span>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-[10px] text-slate-500 uppercase font-mono tracking-tighter">Current Load</span>
-                <span className="text-3xl font-bold mono text-amber-400 tabular-nums">
-                  {currentLoad.toFixed(1)} <small className="text-sm">kW</small>
-                </span>
-                <div className="w-full bg-slate-700 h-1.5 mt-2 rounded-full overflow-hidden">
-                  <div className="bg-amber-400 h-full transition-all duration-500" style={{ width: `${Math.min(100, currentLoad / 0.2)}%` }}></div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="glass-panel p-4 rounded-xl flex-grow overflow-y-auto">
-            <h3 className="text-xs font-semibold text-slate-400 mb-4 border-b border-slate-700 pb-2 uppercase tracking-wider">System Alerts</h3>
-            <div className="space-y-2">
-              <div className="text-xs p-3 bg-slate-800/50 border-l-2 border-amber-500 rounded backdrop-blur">
-                <p className="text-slate-300 font-medium">Phase Unbalance Detected</p>
-                <p className="text-[10px] text-slate-500 mt-1 uppercase font-mono">Xưởng Space - Circuit A2</p>
-              </div>
-              <div className="text-xs p-3 bg-slate-800/50 border-l-2 border-emerald-500 rounded backdrop-blur">
-                <p className="text-slate-300 font-medium">Flow rate stabilized</p>
-                <p className="text-[10px] text-slate-500 mt-1 uppercase font-mono">Xưởng Sơn - Line 04</p>
-              </div>
-              <div className="text-xs p-3 bg-slate-800/50 border-l-2 border-slate-600 rounded opacity-60">
-                <p className="text-slate-400">Routine Check Completed</p>
-                <p className="text-[10px] text-slate-500 mt-1 uppercase font-mono">Energy Hub Gateway</p>
-              </div>
-            </div>
-          </section>
-        </aside>
-
-        {/* Content Area */}
-        <div className="col-span-1 lg:col-span-3 grid grid-rows-2 gap-4 h-full min-h-0 overflow-y-auto lg:overflow-hidden pr-1 lg:pr-0">
-          {data.map((workshop, idx) => (
-            <div key={workshop.id} className="glass-panel rounded-xl p-5 lg:p-6 relative overflow-hidden flex flex-col justify-between">
-              <div className="absolute top-0 right-0 p-2 opacity-5 pointer-events-none">
-                <Factory className="w-32 h-32" />
-              </div>
-              
-              <div className="flex justify-between items-start mb-4 lg:mb-6 shrink-0">
-                <h2 className="text-xl lg:text-2xl font-black uppercase tracking-widest text-slate-100 flex items-center gap-3">
-                  <span className={cn(
-                    "w-3 h-10 rounded-sm shrink-0",
-                    workshop.id === 'son' ? "bg-emerald-500" : "bg-amber-500"
-                  )}></span> 
-                  {workshop.name} 
-                  <span className={cn(
-                    "text-[10px] font-mono font-normal px-2 py-1 rounded tracking-tighter shrink-0",
-                    workshop.id === 'son' ? "text-emerald-500 bg-emerald-500/10" : "text-amber-500 bg-amber-500/10"
-                  )}>
-                    {workshop.id === 'son' ? 'PAINT_SHOP_01' : 'SPACE_SHOP_02'}
-                  </span>
-                </h2>
-                <div className="flex gap-2 lg:gap-4">
-                  <div className="px-2 lg:px-3 py-1 bg-slate-800/80 rounded border border-slate-700 text-[10px] mono uppercase text-slate-400">
-                    STATUS: {workshop.status.toUpperCase()}
-                  </div>
-                  <div className="px-2 lg:px-3 py-1 bg-slate-800/80 rounded border border-slate-700 text-[10px] mono uppercase text-slate-400 hidden sm:block">
-                    UPTIME: 100%
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-6 flex-grow">
-                {/* Electricity */}
-                <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 flex flex-col justify-between">
-                  <div className="flex justify-between items-start mb-2">
-                    <p className="text-[10px] uppercase text-slate-500 font-mono">Electricity Meter (E-00{4+idx})</p>
-                    <Zap className="w-3 h-3 text-emerald-500" />
-                  </div>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-3xl lg:text-4xl font-bold mono text-emerald-400 tabular-nums">
-                      {workshop.power.totalEnergy.toFixed(2)}
-                    </span>
-                    <span className="text-xs text-slate-400 uppercase font-mono">kWh</span>
-                  </div>
-                  <div className="mt-4 grid grid-cols-2 gap-2 text-[9px] mono text-slate-500 border-t border-slate-800 pt-2">
-                    <div className="flex justify-between">
-                      <span>VOLT:</span>
-                      <span className="text-slate-300">{workshop.power.voltage.toFixed(1)}V</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>FREQ:</span>
-                      <span className="text-slate-300">{workshop.power.frequency.toFixed(2)}Hz</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Water */}
-                <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 flex flex-col justify-between">
-                  <div className="flex justify-between items-start mb-2">
-                    <p className="text-[10px] uppercase text-slate-500 font-mono">Water Meter (W-01{2+idx})</p>
-                    <Droplets className="w-3 h-3 text-sky-500" />
-                  </div>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-3xl lg:text-4xl font-bold mono text-sky-400 tabular-nums">
-                      {workshop.water.totalVolume.toFixed(1)}
-                    </span>
-                    <span className="text-xs text-slate-400 uppercase font-mono">m³</span>
-                  </div>
-                  <div className="mt-4 grid grid-cols-2 gap-2 text-[9px] mono text-slate-500 border-t border-slate-800 pt-2">
-                    <div className="flex justify-between">
-                      <span>FLOW:</span>
-                      <span className="text-sky-400">{workshop.water.flowRate.toFixed(1)}L/s</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>PRES:</span>
-                      <span className="text-slate-300">{workshop.water.pressure.toFixed(1)}Bar</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* History Chart */}
-                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700 flex flex-col h-[120px] md:h-full">
-                  <p className="text-[10px] uppercase text-slate-500 mb-2 font-mono">Active Load Trend (kW)</p>
-                  <div className="flex-grow min-h-0">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={workshop.history}>
-                        <defs>
-                          <linearGradient id={`gradient-${workshop.id}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={workshop.id === 'son' ? "#10b981" : "#f59e0b"} stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor={workshop.id === 'son' ? "#10b981" : "#f59e0b"} stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                        <XAxis dataKey="time" hide />
-                        <YAxis hide domain={['auto', 'auto']} />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', fontSize: '10px' }}
-                          labelStyle={{ color: '#94a3b8' }}
-                        />
-                        <Area 
-                          type="monotone" 
-                          dataKey="power" 
-                          stroke={workshop.id === 'son' ? "#10b981" : "#f59e0b"} 
-                          fillOpacity={1} 
-                          fill={`url(#gradient-${workshop.id})`} 
-                          isAnimationActive={false}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
+      {error ? (
+        <div className="flex shrink-0 items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+          <span>{error}</span>
         </div>
-      </main>
+      ) : null}
 
-      {/* Footer */}
-      <footer className="bg-slate-900 border-t border-slate-800 p-2 shrink-0 flex justify-between items-center text-[10px] mono text-slate-500 rounded-b-lg">
-        <div className="flex gap-6">
-          <span>LATENCY: 12ms</span>
-          <span>UPTIME: 242d 11h 05m</span>
-          <span>NODE ID: GX-008</span>
+      {loadState === 'loading' ? (
+        <CenteredPanel icon={<Activity className="h-6 w-6 animate-pulse text-emerald-400" />} title="Connecting to EoH API" />
+      ) : loadState === 'error' ? (
+        <CenteredPanel icon={<AlertTriangle className="h-6 w-6 text-amber-300" />} title="Live data is unavailable" />
+      ) : data.length === 0 ? (
+        <CenteredPanel icon={<Clock className="h-6 w-6 text-slate-300" />} title="No units returned by EoH API" />
+      ) : (
+        <main className="grid min-h-0 flex-grow grid-cols-1 gap-4 overflow-hidden lg:grid-cols-4">
+          <aside className="col-span-1 flex flex-col gap-4 overflow-y-auto pr-1">
+            <section className="glass-panel shrink-0 rounded-xl p-4">
+              <h3 className="mb-4 border-b border-slate-700 pb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Global Metrics</h3>
+              <div className="space-y-6">
+                <MetricBlock label="Total Power Consumption" value={formatNumber(totals.totalPower, 1)} unit="kWh" tone="text-emerald-400" />
+                <MetricBlock label="Total Water Usage" value={formatNumber(totals.totalWater, 1)} unit="m3" tone="text-sky-400" />
+                <div className="flex flex-col">
+                  <span className="mono text-[10px] uppercase tracking-tighter text-slate-500">Current Load</span>
+                  <span className="mono text-3xl font-bold tabular-nums text-amber-400">
+                    {formatNumber(totals.currentLoad, 1)} <small className="text-sm">kW</small>
+                  </span>
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-700">
+                    <div
+                      className="h-full bg-amber-400 transition-all duration-500"
+                      style={{ width: `${Math.min(100, Math.max(0, totals.currentLoad ?? 0))}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="glass-panel flex-grow overflow-y-auto rounded-xl p-4">
+              <h3 className="mb-4 border-b border-slate-700 pb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">System Alerts</h3>
+              <div className="space-y-2">
+                {alerts.length ? alerts.map((alert) => (
+                  <div key={alert.id}>
+                    <AlertItem alert={alert} />
+                  </div>
+                )) : (
+                  <div className="rounded border border-slate-700 bg-slate-800/50 p-3 text-xs text-slate-400">
+                    <div className="flex items-center gap-2 font-medium text-emerald-300">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      No active API alerts
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          </aside>
+
+          <div className="col-span-1 flex min-h-0 flex-col gap-4 overflow-y-auto pr-1 lg:col-span-3 lg:pr-0">
+            {data.map((workshop) => (
+              <div key={workshop.id}>
+                <WorkshopPanel workshop={workshop} />
+              </div>
+            ))}
+          </div>
+        </main>
+      )}
+
+      <footer className="mono flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-b-lg border-t border-slate-800 bg-slate-900 p-2 text-[10px] text-slate-500">
+        <div className="flex flex-wrap gap-6">
+          <span>API LATENCY: {latencyMs == null ? '--' : `${latencyMs}ms`}</span>
+          <span>UNITS: {data.length}</span>
+          <span>SENSORS: {totals.sensorCount}</span>
+          <span>CONFIGS: {totals.configCount}</span>
         </div>
         <div className="flex gap-4">
-          <span className="hidden sm:inline">PLC COMMUNICATION: [CONNECTED]</span>
-          <span className="hidden sm:inline">DATABASE SYNC: [IDLE]</span>
-          <span className="sm:hidden text-emerald-500 font-bold uppercase tracking-widest">[ONLINE]</span>
+          <span className="hidden sm:inline">DATA SOURCE: BACKEND.EOH.IO</span>
+          <span className="font-bold uppercase tracking-widest text-emerald-500 sm:hidden">EOH API</span>
         </div>
       </footer>
     </div>
   );
+}
+
+function WorkshopPanel({ workshop }: { workshop: WorkshopData }) {
+  const statusClass = STATUS_CLASS[workshop.status];
+  const hasChartData = workshop.history.some((point) => point.power != null);
+  const electricPrimary = pickElectricPrimary(workshop);
+  const waterPrimary = pickWaterPrimary(workshop);
+
+  return (
+    <section className="glass-panel relative flex min-h-[280px] flex-col justify-between overflow-hidden rounded-xl p-5 lg:p-6">
+      <div className="pointer-events-none absolute right-0 top-0 p-2 opacity-5">
+        <Factory className="h-32 w-32" />
+      </div>
+
+      <div className="mb-4 flex shrink-0 flex-col gap-3 lg:mb-6 lg:flex-row lg:items-start lg:justify-between">
+        <h2 className="flex min-w-0 items-center gap-3 text-xl font-black uppercase tracking-widest text-slate-100 lg:text-2xl">
+          <span className={cn('h-10 w-3 shrink-0 rounded-sm', workshop.status === 'online' ? 'bg-emerald-500' : 'bg-amber-500')} />
+          <span className="truncate">{workshop.name}</span>
+          <span className="mono shrink-0 rounded bg-slate-800 px-2 py-1 text-[10px] font-normal tracking-tighter text-slate-400">
+            UNIT-{workshop.id}
+          </span>
+        </h2>
+        <div className="flex flex-wrap gap-2 lg:gap-4">
+          <div className={cn('mono rounded border px-2 py-1 text-[10px] uppercase', statusClass)}>
+            STATUS: {workshop.status.toUpperCase()}
+          </div>
+          <div className="mono rounded border border-slate-700 bg-slate-800/80 px-2 py-1 text-[10px] uppercase text-slate-400">
+            SENSORS: {workshop.sensorCount}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid flex-grow grid-cols-1 gap-4 lg:grid-cols-3 lg:gap-6">
+        <MeterCard
+          icon={<Zap className="h-3 w-3 text-emerald-500" />}
+          title="Electricity"
+          value={formatNumber(electricPrimary.value, electricPrimary.decimals)}
+          unit={electricPrimary.unit}
+          tone="text-emerald-400"
+          rows={[
+            ['VOLT', `${formatNumber(workshop.power.voltage, 1)}V`],
+            ['FREQ', `${formatNumber(workshop.power.frequency, 2)}Hz`],
+            ['AMP', `${formatNumber(workshop.power.current, 1)}A`],
+            ['PF', formatNumber(workshop.power.pf, 2)],
+          ]}
+        />
+
+        <MeterCard
+          icon={<Droplets className="h-3 w-3 text-sky-500" />}
+          title="Water"
+          value={formatNumber(waterPrimary.value, waterPrimary.decimals)}
+          unit={waterPrimary.unit}
+          tone="text-sky-400"
+          rows={[
+            ['FLOW', `${formatNumber(workshop.water.flowRate, 1)}L/s`],
+            ['PRES', `${formatNumber(workshop.water.pressure, 1)}Bar`],
+          ]}
+        />
+
+        <div className="flex h-[150px] flex-col rounded-lg border border-slate-700 bg-slate-900/50 p-3 md:h-full">
+          <p className="mono mb-2 text-[10px] uppercase text-slate-500">
+            {workshop.trendLabel} {workshop.trendUnit ? `(${workshop.trendUnit})` : ''}
+          </p>
+          <div className="min-h-0 flex-grow">
+            {hasChartData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={workshop.history}>
+                  <defs>
+                    <linearGradient id={`gradient-${workshop.id}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                  <XAxis dataKey="time" hide />
+                  <YAxis hide domain={['auto', 'auto']} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', fontSize: '10px' }}
+                    labelStyle={{ color: '#94a3b8' }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="power"
+                    stroke="#10b981"
+                    fillOpacity={1}
+                    fill={`url(#gradient-${workshop.id})`}
+                    isAnimationActive={false}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-slate-500">Waiting for live samples</div>
+            )}
+          </div>
+          {workshop.liveValues.length ? (
+            <div className="mono mt-2 grid grid-cols-1 gap-1 border-t border-slate-800 pt-2 text-[10px] text-slate-500">
+              {workshop.liveValues.slice(0, 4).map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-3">
+                  <span className="truncate">{item.name}</span>
+                  <span className="shrink-0 text-emerald-300">
+                    {formatNumber(item.value, 2)} {item.unit}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetricBlock({ label, value, unit, tone }: { label: string; value: string; unit: string; tone: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="mono text-[10px] uppercase tracking-tighter text-slate-500">{label}</span>
+      <span className={cn('mono text-3xl font-bold tabular-nums', tone)}>
+        {value} <small className="text-sm">{unit}</small>
+      </span>
+    </div>
+  );
+}
+
+function MeterCard({
+  icon,
+  title,
+  value,
+  unit,
+  tone,
+  rows,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  value: string;
+  unit: string;
+  tone: string;
+  rows: [string, string][];
+}) {
+  return (
+    <div className="flex flex-col justify-between rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+      <div className="mb-2 flex items-start justify-between">
+        <p className="mono text-[10px] uppercase text-slate-500">{title}</p>
+        {icon}
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className={cn('mono text-3xl font-bold tabular-nums lg:text-4xl', tone)}>{value}</span>
+        <span className="mono text-xs uppercase text-slate-400">{unit}</span>
+      </div>
+      <div className="mono mt-4 grid grid-cols-2 gap-2 border-t border-slate-800 pt-2 text-[9px] text-slate-500">
+        {rows.map(([label, rowValue]) => (
+          <div key={label} className="flex justify-between gap-2">
+            <span>{label}:</span>
+            <span className="text-slate-300">{rowValue}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AlertItem({ alert }: { alert: DashboardAlert }) {
+  return (
+    <div className="rounded border-l-2 border-amber-500 bg-slate-800/50 p-3 text-xs backdrop-blur">
+      <p className="font-medium text-slate-300">{alert.title}</p>
+      <p className="mono mt-1 text-[10px] uppercase text-slate-500">{alert.location}</p>
+      {alert.createdAt ? (
+        <p className="mono mt-1 text-[10px] text-slate-600">{new Date(alert.createdAt).toLocaleString()}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function CenteredPanel({ icon, title }: { icon: React.ReactNode; title: string }) {
+  return (
+    <main className="glass-panel flex min-h-0 flex-grow items-center justify-center rounded-xl">
+      <div className="flex flex-col items-center gap-3 text-slate-300">
+        {icon}
+        <p className="mono text-sm uppercase tracking-wider">{title}</p>
+      </div>
+    </main>
+  );
+}
+
+function getSystemStatus(loadState: LoadState, error: string, dataLength: number) {
+  if (loadState === 'loading') {
+    return { label: 'SYNCING', color: 'text-amber-400', dot: 'bg-amber-500' };
+  }
+
+  if (loadState === 'error' || (error && dataLength === 0)) {
+    return { label: 'API ERROR', color: 'text-rose-400', dot: 'bg-rose-500' };
+  }
+
+  return {
+    label: error ? 'STALE DATA' : 'OPERATIONAL',
+    color: error ? 'text-amber-400' : 'text-emerald-400',
+    dot: error ? 'bg-amber-500' : 'bg-emerald-500 glow-emerald',
+  };
+}
+
+function sumKnown(values: (number | null)[]) {
+  const knownValues = values.filter((value): value is number => value != null);
+  return knownValues.length ? knownValues.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function formatNumber(value: number | null, maximumFractionDigits: number) {
+  if (value == null) {
+    return '--';
+  }
+
+  return value.toLocaleString(undefined, { maximumFractionDigits });
+}
+
+function pickElectricPrimary(workshop: WorkshopData) {
+  return [
+    { value: workshop.power.totalEnergy, unit: 'kWh', decimals: 2 },
+    { value: workshop.power.activePower, unit: 'kW', decimals: 2 },
+    { value: workshop.power.voltage, unit: 'V', decimals: 2 },
+    { value: workshop.power.current, unit: 'A', decimals: 2 },
+    { value: workshop.power.frequency, unit: 'Hz', decimals: 2 },
+  ].find((item) => item.value != null) ?? { value: null, unit: 'kWh', decimals: 2 };
+}
+
+function pickWaterPrimary(workshop: WorkshopData) {
+  return [
+    { value: workshop.water.totalVolume, unit: 'm3', decimals: 1 },
+    { value: workshop.water.flowRate, unit: 'L/s', decimals: 2 },
+    { value: workshop.water.pressure, unit: 'Bar', decimals: 2 },
+  ].find((item) => item.value != null) ?? { value: null, unit: 'm3', decimals: 1 };
 }

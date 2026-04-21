@@ -4,11 +4,23 @@ A professional-grade energy and resources monitoring dashboard designed for indu
 
 ## Features
 
-- **Real-time Monitoring**: Live telemetry simulation for electricity (kWh) and water (m³) consumption.
+- **Real-time Monitoring**: Live telemetry from the EoH API for electricity (kWh) and water (m3) consumption.
 - **SCADA Aesthetic**: High-contrast, technical UI optimized for industrial control rooms.
-- **Workshop Segmentation**: Distinct monitoring for separate facility units (e.g., Paint Shop, Space Shop).
+- **Unit Segmentation**: Distinct monitoring for facility units returned by the EoH API.
 - **Responsive Design**: Fluid layout that scales from mobile devices to large display walls.
 - **Built with Modern Tech**: React 19, Vite, Tailwind CSS, Recharts, and Framer Motion.
+
+## EoH API Configuration
+
+Create a local `.env.local` file with:
+
+```bash
+VITE_EOH_API_BASE_URL="https://backend.eoh.io/api"
+VITE_EOH_API_TOKEN="YOUR_EOH_TOKEN"
+VITE_EOH_POLL_INTERVAL_MS="10000"
+```
+
+The API uses the `Authorization: Token <token>` header. You can paste either the raw token or a full `Token ...` value into `VITE_EOH_API_TOKEN`.
 
 ## Deployment Instructions
 
