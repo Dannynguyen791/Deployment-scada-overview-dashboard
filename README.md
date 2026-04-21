@@ -20,7 +20,17 @@ VITE_EOH_API_TOKEN="YOUR_EOH_TOKEN"
 VITE_EOH_POLL_INTERVAL_MS="10000"
 ```
 
-The API uses the `Authorization: Token <token>` header. You can paste either the raw token or a full `Token ...` value into `VITE_EOH_API_TOKEN`.
+The local Vite app calls the backend directly and uses the `Authorization: Token <token>` header. You can paste either the raw token or a full `Token ...` value into `VITE_EOH_API_TOKEN`.
+
+For Vercel production, configure these Environment Variables in the Vercel project:
+
+```bash
+EOH_API_BASE_URL="https://backend.eoh.io/api"
+EOH_API_TOKEN="YOUR_EOH_TOKEN"
+VITE_EOH_POLL_INTERVAL_MS="10000"
+```
+
+The production build calls the same-origin `/api/eoh/*` serverless proxy so browser CORS rules do not block `backend.eoh.io`, and the token stays server-side.
 
 ## Deployment Instructions
 

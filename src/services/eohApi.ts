@@ -1,4 +1,5 @@
 const DEFAULT_API_BASE_URL = 'https://backend.eoh.io/api';
+const PRODUCTION_PROXY_BASE_URL = '/api/eoh';
 const DEFAULT_POLL_INTERVAL_MS = 10000;
 const TOPOLOGY_TTL_MS = 5 * 60 * 1000;
 const MAX_HISTORY_POINTS = 20;
@@ -366,12 +367,15 @@ async function apiFetch<T>(
   path: string,
   options: { method: string; body?: unknown; signal?: AbortSignal; query?: Record<string, string> },
 ) {
-  const token = readApiToken();
+  const baseUrl = readApiBaseUrl();
   const url = buildApiUrl(path, options.query);
   const headers = new Headers({
     Accept: 'application/json',
-    Authorization: formatAuthorization(token),
   });
+
+  if (shouldUseBrowserToken(baseUrl)) {
+    headers.set('Authorization', formatAuthorization(readApiToken()));
+  }
 
   const init: RequestInit = {
     method: options.method,
@@ -402,7 +406,10 @@ async function apiFetch<T>(
 
 function buildApiUrl(path: string, query?: Record<string, string>) {
   const base = readApiBaseUrl().replace(/\/+$/, '');
-  const url = new URL(`${base}${path.startsWith('/') ? path : `/${path}`}`);
+  const url = new URL(
+    `${base}${path.startsWith('/') ? path : `/${path}`}`,
+    window.location.origin,
+  );
 
   Object.entries(query ?? {}).forEach(([key, value]) => {
     if (value) {
@@ -414,11 +421,21 @@ function buildApiUrl(path: string, query?: Record<string, string>) {
 }
 
 function readApiBaseUrl() {
-  return trimEnv(import.meta.env.VITE_EOH_API_BASE_URL) || DEFAULT_API_BASE_URL;
+  const configuredBaseUrl = trimEnv(import.meta.env.VITE_EOH_API_BASE_URL);
+
+  if (import.meta.env.PROD && (!configuredBaseUrl || configuredBaseUrl === DEFAULT_API_BASE_URL)) {
+    return PRODUCTION_PROXY_BASE_URL;
+  }
+
+  return configuredBaseUrl || DEFAULT_API_BASE_URL;
+}
+
+function shouldUseBrowserToken(baseUrl: string) {
+  return import.meta.env.DEV && /^https?:\/\//i.test(baseUrl);
 }
 
 function readApiToken() {
-  const token = trimEnv(import.meta.env.VITE_EOH_API_TOKEN);
+  const token = import.meta.env.DEV ? trimEnv(import.meta.env.VITE_EOH_API_TOKEN) : '';
 
   if (!token) {
     throw new EohApiError('EoH API token is not configured. Set VITE_EOH_API_TOKEN before running the dashboard.', {
