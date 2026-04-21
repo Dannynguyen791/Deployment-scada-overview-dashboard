@@ -1,0 +1,42 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-[#0f172a] text-[#f8fafc] font-sans h-screen overflow-hidden;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-slate-900/60 border border-slate-700/50 backdrop-blur-md shadow-xl relative overflow-hidden;
+  }
+  
+  .glass-panel::before {
+    content: "";
+    @apply absolute inset-0 bg-linear-to-br from-white/[0.03] to-transparent pointer-events-none;
+  }
+  
+  .mono {
+    @apply font-mono tracking-tight;
+  }
+  
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block mr-2 relative;
+  }
+  
+  .status-dot::after {
+    content: "";
+    @apply absolute inset-0 rounded-full animate-ping opacity-75;
+    background-color: inherit;
+  }
+  
+  .glow-emerald {
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
+  }
+}
