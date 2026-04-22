@@ -31,6 +31,7 @@ VITE_EOH_POLL_INTERVAL_MS="10000"
 ```
 
 The production build calls the same-origin `/api/eoh/*` serverless proxy so browser CORS rules do not block `backend.eoh.io`, and the token stays server-side.
+Do not set `VITE_EOH_API_TOKEN` in Vercel; if you need to point production at another backend, set `EOH_API_BASE_URL` instead of a public `VITE_` value.
 
 ## Deployment Instructions
 

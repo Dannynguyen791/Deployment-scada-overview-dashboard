@@ -423,8 +423,8 @@ function buildApiUrl(path: string, query?: Record<string, string>) {
 function readApiBaseUrl() {
   const configuredBaseUrl = trimEnv(import.meta.env.VITE_EOH_API_BASE_URL);
 
-  if (import.meta.env.PROD && (!configuredBaseUrl || configuredBaseUrl === DEFAULT_API_BASE_URL)) {
-    return PRODUCTION_PROXY_BASE_URL;
+  if (import.meta.env.PROD) {
+    return configuredBaseUrl.startsWith('/') ? configuredBaseUrl : PRODUCTION_PROXY_BASE_URL;
   }
 
   return configuredBaseUrl || DEFAULT_API_BASE_URL;
