@@ -406,6 +406,20 @@ async function apiFetch<T>(
 
 function buildApiUrl(path: string, query?: Record<string, string>) {
   const base = readApiBaseUrl().replace(/\/+$/, '');
+
+  if (shouldUseProxyQueryUrl(base)) {
+    const url = new URL(base, window.location.origin);
+    url.searchParams.set('path', path.replace(/^\/+/, ''));
+
+    Object.entries(query ?? {}).forEach(([key, value]) => {
+      if (value) {
+        url.searchParams.set(key, value);
+      }
+    });
+
+    return url.toString();
+  }
+
   const url = new URL(
     `${base}${path.startsWith('/') ? path : `/${path}`}`,
     window.location.origin,
@@ -418,6 +432,10 @@ function buildApiUrl(path: string, query?: Record<string, string>) {
   });
 
   return url.toString();
+}
+
+function shouldUseProxyQueryUrl(baseUrl: string) {
+  return import.meta.env.PROD && baseUrl === PRODUCTION_PROXY_BASE_URL;
 }
 
 function readApiBaseUrl() {
