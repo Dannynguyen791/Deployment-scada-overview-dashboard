@@ -1,42 +1,108 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;700&display=swap');
 @import "tailwindcss";
 
+:root {
+  --scada-bg-top: #050b1f;
+  --scada-bg-bottom: #08142f;
+  --panel-bg: rgba(8, 19, 44, 0.72);
+  --panel-border: rgba(86, 110, 149, 0.42);
+  --grid: rgba(110, 145, 200, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.035);
+}
+
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Rajdhani", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "Consolas", monospace;
 }
 
 @layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   body {
-    @apply bg-[#0f172a] text-[#f8fafc] font-sans h-screen overflow-hidden;
+    margin: 0;
+    background:
+      radial-gradient(circle at 15% 10%, rgba(18, 79, 130, 0.36) 0%, transparent 32%),
+      radial-gradient(circle at 88% 16%, rgba(16, 185, 129, 0.12) 0%, transparent 28%),
+      linear-gradient(180deg, var(--scada-bg-top) 0%, var(--scada-bg-bottom) 100%);
+    color: #e7eef9;
+    font-family: var(--font-sans);
+    overflow: hidden;
   }
 }
 
 @layer components {
-  .glass-panel {
-    @apply bg-slate-900/60 border border-slate-700/50 backdrop-blur-md shadow-xl relative overflow-hidden;
+  .scada-app {
+    position: relative;
   }
-  
+
+  .scada-grid-overlay {
+    background-image:
+      linear-gradient(to right, var(--grid) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(circle at 50% 45%, black 24%, transparent 78%);
+    opacity: 0.45;
+  }
+
+  .glass-panel {
+    background: linear-gradient(180deg, rgba(13, 24, 52, 0.9), var(--panel-bg));
+    border: 1px solid var(--panel-border);
+    backdrop-filter: blur(10px) saturate(115%);
+    -webkit-backdrop-filter: blur(10px) saturate(115%);
+    box-shadow:
+      0 10px 40px rgba(2, 6, 23, 0.46),
+      inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    overflow: hidden;
+  }
+
   .glass-panel::before {
     content: "";
-    @apply absolute inset-0 bg-linear-to-br from-white/[0.03] to-transparent pointer-events-none;
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(140deg, var(--glass-highlight), transparent 42%);
+    pointer-events: none;
   }
-  
+
   .mono {
-    @apply font-mono tracking-tight;
+    font-family: var(--font-mono);
   }
-  
+
   .status-dot {
-    @apply w-2 h-2 rounded-full inline-block mr-2 relative;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 9999px;
+    display: inline-flex;
+    position: relative;
   }
-  
+
   .status-dot::after {
     content: "";
-    @apply absolute inset-0 rounded-full animate-ping opacity-75;
-    background-color: inherit;
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: inherit;
+    animation: scada-pulse 1.6s ease-out infinite;
+    opacity: 0.65;
   }
-  
-  .glow-emerald {
-    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
+
+  @keyframes scada-pulse {
+    0% {
+      transform: scale(1);
+      opacity: 0.85;
+    }
+
+    72% {
+      transform: scale(2.5);
+      opacity: 0.1;
+    }
+
+    100% {
+      transform: scale(2.9);
+      opacity: 0;
+    }
   }
 }

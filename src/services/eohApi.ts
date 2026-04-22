@@ -3,6 +3,18 @@ const PRODUCTION_PROXY_BASE_URL = '/api/eoh';
 const DEFAULT_POLL_INTERVAL_MS = 10000;
 const TOPOLOGY_TTL_MS = 5 * 60 * 1000;
 const MAX_HISTORY_POINTS = 20;
+const PSON_TARGET_KEY = 'pson';
+const PCON_TARGET_KEY = 'pcon';
+const DEFAULT_PSON_CONFIG_ID = '165693';
+const DEFAULT_PCON_CONFIG_ID = '169059';
+const DEFAULT_PSON_GATEWAY_ID = '13368';
+const DEFAULT_PSON_NAME = 'P-SON';
+const DEFAULT_PCON_NAME = 'P-CON';
+const DEFAULT_PSON_FUNCTION_CODE = '4';
+const DEFAULT_PSON_DATA_ADDRESS = '58';
+const DEFAULT_PSON_DATA_LENGTH = '2';
+const DEFAULT_PSON_TRANSFORMER = 'Float - Big Endian';
+const DEFAULT_PSON_UNIT_KEYS = 'PAINT_SHOP_01,XUONG SON';
 
 type MetricValue = number | null;
 
@@ -13,6 +25,12 @@ export interface LiveConfigValue {
   value: MetricValue;
   sourceName: string;
   updatedAt: string;
+  targetKey?: string;
+  gatewayId?: number;
+  functionCode?: number;
+  dataAddress?: number;
+  dataLength?: number;
+  transformer?: string;
 }
 
 export interface PowerData {
@@ -44,6 +62,7 @@ export interface WorkshopData {
   sensorCount: number;
   chipCount: number;
   sourceUpdatedAt: string;
+  matchHints: string[];
 }
 
 export interface DashboardAlert {
@@ -76,6 +95,39 @@ interface ApiConfig {
   id?: number | string;
   name?: string | null;
   unit?: string | null;
+  measurement_unit?: string | null;
+  measurementUnit?: string | null;
+  read_name?: string | null;
+  config_read_name?: string | null;
+  configReadName?: string | null;
+  function?: number | string | null;
+  function_code?: number | string | null;
+  functionCode?: number | string | null;
+  data_address?: number | string | null;
+  dataAddress?: number | string | null;
+  address?: number | string | null;
+  register_address?: number | string | null;
+  registerAddress?: number | string | null;
+  len?: number | string | null;
+  length?: number | string | null;
+  data_len?: number | string | null;
+  dataLen?: number | string | null;
+  register_length?: number | string | null;
+  registerLength?: number | string | null;
+  transformer?: unknown;
+  transform?: unknown;
+  data_type?: unknown;
+  dataType?: unknown;
+  gateway_id?: number | string | null;
+  gatewayId?: number | string | null;
+  end_device_id?: number | string | null;
+  endDeviceId?: number | string | null;
+  device_id?: number | string | null;
+  deviceId?: number | string | null;
+  sensor?: ApiSensor | null;
+  device?: ApiSensor | null;
+  end_device?: ApiSensor | null;
+  source_sensor?: ApiSensor | null;
 }
 
 interface ApiStation {
@@ -91,6 +143,12 @@ interface DashboardConfig {
   measurementUnit: string;
   sensorId?: number;
   sensorName?: string;
+  targetKey?: string;
+  gatewayId?: number;
+  functionCode?: number;
+  dataAddress?: number;
+  dataLength?: number;
+  transformer?: string;
 }
 
 interface ConfigReading {
@@ -104,6 +162,23 @@ interface UnitTopology {
   name: string;
   configs: DashboardConfig[];
   sensorCount: number;
+  stationNames: string[];
+}
+
+interface PsonTarget {
+  configId: number | null;
+  gatewayId: number | null;
+  name: string;
+  functionCode: number | null;
+  dataAddress: number | null;
+  dataLength: number | null;
+  transformer: string;
+  unitKeys: string[];
+}
+
+interface TargetConfig extends PsonTarget {
+  targetKey: string;
+  defaultUnit: string;
 }
 
 interface ApiChipHealth {
@@ -208,13 +283,18 @@ async function getTopology(signal?: AbortSignal): Promise<UnitTopology[]> {
   const topology = await Promise.all(units.map(async (unit) => {
     const { configs, sensorCount } = unit.rawId == null
       ? { configs: [] as DashboardConfig[], sensorCount: 0 }
-      : await fetchUnitConfigs(unit.rawId, unit.stations, signal);
+      : await fetchUnitConfigs(unit.rawId, unit.name, unit.stations, signal);
 
     return {
       id: unit.id,
       name: unit.name,
       configs,
       sensorCount,
+      stationNames: Array.from(new Set(
+        unit.stations
+          .map((station) => safeText(station.name, ''))
+          .filter(Boolean),
+      )),
     };
   }));
 
@@ -222,7 +302,7 @@ async function getTopology(signal?: AbortSignal): Promise<UnitTopology[]> {
   return topology;
 }
 
-async function fetchUnitConfigs(unitId: number, stationsFromUnit: ApiStation[], signal?: AbortSignal) {
+async function fetchUnitConfigs(unitId: number, unitName: string, stationsFromUnit: ApiStation[], signal?: AbortSignal) {
   const fallbackSensorPayload = stationsFromUnit.length
     ? null
     : await apiGet<unknown>(`/property_manager/iot_dashboard/units_v2/${unitId}/device_sensor/`, signal);
@@ -247,12 +327,15 @@ async function fetchUnitConfigs(unitId: number, stationsFromUnit: ApiStation[], 
     );
 
     return normalizeArray<ApiConfig>(payload)
-      .map((config) => normalizeConfig(config, undefined, safeText(station.name, 'Station')))
+      .map((config) => normalizeConfig(config, safeText(station.name, 'Station')))
       .filter((config): config is DashboardConfig => config != null);
   }));
 
+  const stationConfigs = uniqueConfigs(configGroups.flat());
+  const psonConfigs = await fetchTargetedConfigs(unitName, stations, stationConfigs, signal);
+
   return {
-    configs: uniqueConfigs(configGroups.flat()),
+    configs: uniqueConfigs([...stationConfigs, ...psonConfigs]),
     sensorCount: sensors.length,
   };
 }
@@ -297,6 +380,12 @@ function buildWorkshop(
   };
   const liveValues = buildLiveValues(unit.configs, values);
   const trend = pickTrendValue(power, liveValues);
+  const matchHints = Array.from(new Set([
+    unit.name,
+    ...unit.stationNames,
+    ...liveValues.map((value) => safeText(value.sourceName, '')),
+    ...liveValues.map((value) => safeText(value.name, '')),
+  ].filter(Boolean)));
 
   return {
     id: unit.id,
@@ -312,6 +401,7 @@ function buildWorkshop(
     sensorCount: unit.sensorCount,
     chipCount: healthByUnit.get(unit.id)?.chips?.length ?? 0,
     sourceUpdatedAt: fetchedAt.toISOString(),
+    matchHints,
   };
 }
 
@@ -327,6 +417,12 @@ function buildLiveValues(configs: DashboardConfig[], values: Map<number, ConfigR
         value: toNumber(reading?.value),
         sourceName: safeText(config.sensorName, ''),
         updatedAt: safeText(reading?.updatedAt, ''),
+        targetKey: config.targetKey,
+        gatewayId: config.gatewayId,
+        functionCode: config.functionCode,
+        dataAddress: config.dataAddress,
+        dataLength: config.dataLength,
+        transformer: config.transformer,
       };
     })
     .filter((item) => item.value != null)
@@ -334,6 +430,16 @@ function buildLiveValues(configs: DashboardConfig[], values: Map<number, ConfigR
 }
 
 function pickTrendValue(power: PowerData, liveValues: LiveConfigValue[]) {
+  const pconValue = liveValues.find((item) => item.targetKey === PCON_TARGET_KEY && item.value != null);
+
+  if (pconValue) {
+    return {
+      label: 'P-CON Trend',
+      unit: pconValue.unit || 'kW',
+      value: pconValue.value,
+    };
+  }
+
   const preferred = [
     { label: 'Active Load Trend', unit: 'kW', value: power.activePower },
     { label: 'Voltage Trend', unit: 'V', value: power.voltage },
@@ -489,20 +595,260 @@ async function readErrorMessage(response: Response) {
   }
 }
 
-function normalizeConfig(config: ApiConfig, sensorId: number, sensorName: string): DashboardConfig | null {
+function normalizeConfig(config: ApiConfig, fallbackSensorName: string): DashboardConfig | null {
   const id = readNumericId(config.id);
 
   if (id == null) {
     return null;
   }
 
+  const sourceSensor = config.sensor
+    ?? config.device
+    ?? config.end_device
+    ?? config.source_sensor;
+  const record = config as Record<string, unknown>;
+
   return {
     id,
-    name: safeText(config.name, `Config ${id}`),
-    measurementUnit: safeText(config.unit, ''),
-    sensorId,
-    sensorName,
+    name: safeText(readFirstDefined(record, ['name', 'read_name', 'config_read_name', 'configReadName']), `Config ${id}`),
+    measurementUnit: safeText(readFirstDefined(record, ['unit', 'measurement_unit', 'measurementUnit']), ''),
+    sensorId: readNumericId(sourceSensor?.id) ?? undefined,
+    sensorName: safeText(sourceSensor?.name, fallbackSensorName),
+    gatewayId: readNumericId(readFirstDefined(record, [
+      'gateway_id',
+      'gatewayId',
+      'end_device_id',
+      'endDeviceId',
+      'device_id',
+      'deviceId',
+    ])) ?? readNumericId(sourceSensor?.id) ?? undefined,
+    functionCode: readNumericId(readFirstDefined(record, ['function', 'function_code', 'functionCode'])),
+    dataAddress: readNumericId(readFirstDefined(record, [
+      'data_address',
+      'dataAddress',
+      'address',
+      'register_address',
+      'registerAddress',
+    ])),
+    dataLength: readNumericId(readFirstDefined(record, [
+      'len',
+      'length',
+      'data_len',
+      'dataLen',
+      'register_length',
+      'registerLength',
+    ])),
+    transformer: readTransformer(record),
   };
+}
+
+async function fetchTargetedConfigs(
+  unitName: string,
+  stations: ApiStation[],
+  stationConfigs: DashboardConfig[],
+  signal?: AbortSignal,
+) {
+  const targets = readTargetConfigs();
+
+  if (!targets.some((target) => isTargetCandidateUnit(unitName, stations, target))) {
+    return [];
+  }
+
+  const chipConfigsByGateway = new Map<number, DashboardConfig[]>();
+  const targetedConfigs: DashboardConfig[] = [];
+
+  for (const target of targets) {
+    if (!isTargetCandidateUnit(unitName, stations, target)) {
+      continue;
+    }
+
+    const existingConfig = stationConfigs.find((config) => config.id === target.configId);
+    const chipConfigs = target.gatewayId == null
+      ? []
+      : await getChipConfigs(target.gatewayId, chipConfigsByGateway, signal);
+    const chipConfig = !existingConfig
+      ? chipConfigs.find((config) => config.id === target.configId)
+      : undefined;
+
+    if (target.configId != null) {
+      targetedConfigs.push(markTargetConfig(existingConfig ?? chipConfig ?? {
+        id: target.configId,
+        name: target.name,
+        measurementUnit: target.defaultUnit,
+        sensorName: target.gatewayId == null ? target.name : `Gateway ${target.gatewayId}`,
+        gatewayId: target.gatewayId ?? undefined,
+        functionCode: target.functionCode ?? undefined,
+        dataAddress: target.dataAddress ?? undefined,
+        dataLength: target.dataLength ?? undefined,
+        transformer: target.transformer,
+      }, target.targetKey));
+      continue;
+    }
+
+    const exactStationMatches = stationConfigs
+      .filter((config) => matchesTargetConfig(config, target))
+      .map((config) => markTargetConfig(config, target.targetKey));
+
+    if (exactStationMatches.length) {
+      targetedConfigs.push(...exactStationMatches);
+      continue;
+    }
+
+    targetedConfigs.push(
+      ...chipConfigs
+        .filter((config) => matchesTargetConfig(config, target))
+        .map((config) => markTargetConfig(config, target.targetKey)),
+    );
+  }
+
+  return targetedConfigs;
+}
+
+async function getChipConfigs(
+  chipId: number,
+  cache: Map<number, DashboardConfig[]>,
+  signal?: AbortSignal,
+) {
+  const cached = cache.get(chipId);
+
+  if (cached) {
+    return cached;
+  }
+
+  const configs = await fetchChipConfigs(chipId, signal);
+  cache.set(chipId, configs);
+  return configs;
+}
+
+async function fetchChipConfigs(chipId: number, signal?: AbortSignal) {
+  try {
+    const payload = await apiGet<unknown>('/chip_manager/configs/', signal, { chip: String(chipId) });
+    return normalizeArray<ApiConfig>(payload)
+      .map((config) => normalizeConfig(config, `Gateway ${chipId}`))
+      .filter((config): config is DashboardConfig => config != null)
+      .map((config) => ({ ...config, gatewayId: config.gatewayId ?? chipId }));
+  } catch (error) {
+    if (error instanceof EohApiError && [400, 404, 405].includes(error.status ?? 0)) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+function matchesTargetConfig(config: DashboardConfig, target: TargetConfig) {
+  if (target.configId != null) {
+    return config.id === target.configId;
+  }
+
+  const nameMatches = normalizeKey(config.name).includes(normalizeKey(target.name));
+
+  if (!nameMatches) {
+    return false;
+  }
+
+  const gatewayMatches = target.gatewayId == null
+    || config.gatewayId == null
+    || config.gatewayId === target.gatewayId;
+  const functionMatches = target.functionCode == null
+    || config.functionCode == null
+    || config.functionCode === target.functionCode;
+  const addressMatches = target.dataAddress == null
+    || config.dataAddress == null
+    || config.dataAddress === target.dataAddress;
+  const lengthMatches = target.dataLength == null
+    || config.dataLength == null
+    || config.dataLength === target.dataLength;
+  const transformerMatches = !target.transformer
+    || !config.transformer
+    || normalizeKey(config.transformer).includes(normalizeKey(target.transformer));
+
+  const hasStrongIdentity = config.gatewayId != null
+    || config.functionCode != null
+    || config.dataAddress != null
+    || config.dataLength != null
+    || Boolean(config.transformer);
+
+  return hasStrongIdentity
+    && gatewayMatches
+    && functionMatches
+    && addressMatches
+    && lengthMatches
+    && transformerMatches;
+}
+
+function markTargetConfig(config: DashboardConfig, targetKey: string): DashboardConfig {
+  return {
+    ...config,
+    targetKey,
+  };
+}
+
+function isTargetCandidateUnit(unitName: string, stations: ApiStation[], target: TargetConfig) {
+  const gatewayId = target.gatewayId;
+
+  if (gatewayId != null && stations.some((station) => stationHasDevice(station, gatewayId))) {
+    return true;
+  }
+
+  const locationText = normalizeKey([
+    unitName,
+    ...stations.map((station) => safeText(station.name, '')),
+  ].join(' '));
+
+  return target.unitKeys.some((key) => locationText.includes(normalizeKey(key)));
+}
+
+function stationHasDevice(station: ApiStation, deviceId: number) {
+  return [
+    ...(Array.isArray(station.devices) ? station.devices : []),
+    ...(Array.isArray(station.sensors) ? station.sensors : []),
+  ].some((device) => readNumericId(device.id) === deviceId);
+}
+
+function readTargetConfigs(): TargetConfig[] {
+  const unitKeys = (trimEnv(import.meta.env.VITE_EOH_PSON_UNIT_KEYS) || DEFAULT_PSON_UNIT_KEYS)
+    .split(',')
+    .map((key) => key.trim())
+    .filter(Boolean);
+
+  return [{
+    configId: readNumericId(trimEnv(import.meta.env.VITE_EOH_PSON_CONFIG_ID) || DEFAULT_PSON_CONFIG_ID),
+    gatewayId: readNumericId(trimEnv(import.meta.env.VITE_EOH_PSON_GATEWAY_ID) || DEFAULT_PSON_GATEWAY_ID),
+    name: trimEnv(import.meta.env.VITE_EOH_PSON_NAME) || DEFAULT_PSON_NAME,
+    functionCode: readNumericId(trimEnv(import.meta.env.VITE_EOH_PSON_FUNCTION_CODE) || DEFAULT_PSON_FUNCTION_CODE),
+    dataAddress: readNumericId(trimEnv(import.meta.env.VITE_EOH_PSON_DATA_ADDRESS) || DEFAULT_PSON_DATA_ADDRESS),
+    dataLength: readNumericId(trimEnv(import.meta.env.VITE_EOH_PSON_DATA_LENGTH) || DEFAULT_PSON_DATA_LENGTH),
+    transformer: trimEnv(import.meta.env.VITE_EOH_PSON_TRANSFORMER) || DEFAULT_PSON_TRANSFORMER,
+    unitKeys,
+    targetKey: PSON_TARGET_KEY,
+    defaultUnit: 'kWh',
+  }, {
+    configId: readNumericId(trimEnv(import.meta.env.VITE_EOH_PCON_CONFIG_ID) || DEFAULT_PCON_CONFIG_ID),
+    gatewayId: readNumericId(trimEnv(import.meta.env.VITE_EOH_PCON_GATEWAY_ID) || DEFAULT_PSON_GATEWAY_ID),
+    name: trimEnv(import.meta.env.VITE_EOH_PCON_NAME) || DEFAULT_PCON_NAME,
+    functionCode: null,
+    dataAddress: null,
+    dataLength: null,
+    transformer: '',
+    unitKeys,
+    targetKey: PCON_TARGET_KEY,
+    defaultUnit: 'kW',
+  }];
+}
+
+function readTransformer(source: Record<string, unknown>) {
+  const rawValue = readFirstDefined(source, ['transformer', 'transform', 'data_type', 'dataType']);
+
+  if (typeof rawValue === 'string') {
+    return rawValue.trim() || undefined;
+  }
+
+  if (isRecord(rawValue)) {
+    return safeText(readFirstDefined(rawValue, ['name', 'label', 'title', 'type']), '') || undefined;
+  }
+
+  return undefined;
 }
 
 function extractStations(payload: unknown): ApiStation[] {
@@ -982,6 +1328,10 @@ function normalizeText(value: string) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\u00b3/g, '3')
     .toLowerCase();
+}
+
+function normalizeKey(value: string) {
+  return normalizeText(value).replace(/[^a-z0-9]+/g, '');
 }
 
 function normalizeUnit(value: string) {
